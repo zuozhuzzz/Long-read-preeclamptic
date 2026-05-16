@@ -1,0 +1,81 @@
+# ==========================================
+# WGBS (Whole-Genome Bisulfite Sequencing) Pipeline
+# ==========================================
+
+# 1. Quality Control and Adapter Trimming
+cat sample_list.txt | while read id; do
+    trim_galore \
+        --nextera \
+        --paired \
+        --cores 6 \
+        --output_dir <TRIM_DIR> \
+        <RAW_DIR>/${id}_1.fq.gz \
+        <RAW_DIR>/${id}_2.fq.gz
+done
+
+# 2. Reference Genome Preparation
+# Note: This step only needs to be run once per reference genome
+bismark_genome_preparation \
+    --path_to_aligner <ALIGNER_BIN_DIR> \
+    --verbose <INDEX_DIR>
+
+# 3. Read Alignment
+cat sample_list.txt | while read id; do
+    bismark \
+        --genome_folder <INDEX_DIR> \
+        -1 <TRIM_DIR>/${id}_1_val_1.fq.gz \
+        -2 <TRIM_DIR>/${id}_2_val_2.fq.gz \
+        --output_dir <BISMARK_DIR> \
+        --temp_dir <BISMARK_DIR>/tmp \
+        --parallel 30
+done
+
+# 4. Methylation Extraction
+cat sample_list.txt | while read id; do
+    bismark_methylation_extractor \
+        --gzip \
+        --bedGraph \
+        --cytosine_report \
+        --output <BISMARK_DIR>/${id} \
+        --genome_folder <INDEX_DIR> \
+        --parallel 60 \
+        <BISMARK_DIR>/${id}_1_val_1_bismark_bt2_pe.bam
+done
+
+# 5. Differentially Methylated Regions (DMR) Analysis
+# 5.1 Extract CpG data for individual samples
+cat sample_list.txt | while read id; do
+    samtools view -h <BISMARK_DIR>/${id}_1_val_1_bismark_bt2_pe.bam | \
+    python extract_CpG_data.py -i - -o <DMR_DIR>/${id}.cov -v
+done
+
+# 5.2 Combine CpG sites across all experimental (PE) and control (PN) samples
+python combine_CpG_sites.py \
+    -v \
+    -o <DMR_DIR>/combined.csv \
+    <DMR_DIR>/PE_8.cov <DMR_DIR>/PE_9.cov <DMR_DIR>/PE_14.cov \
+    <DMR_DIR>/PN_9.cov <DMR_DIR>/PN_16.cov <DMR_DIR>/PN_17.cov
+
+# 5.3 Find DMRs between experimental and control groups
+Rscript findDMRs.r \
+    -i <DMR_DIR>/combined.csv \
+    -o <DMR_DIR>/results.csv \
+    -v \
+    -n PE,PN PE_8,PE_9,PE_14 PN_9,PN_16,PN_17
+
+# 6. BAM Sorting and BigWig Track Generation (for visualization)
+cat sample_list.txt | while read id; do
+    # Sort and index BAM files
+    samtools sort -o <BISMARK_DIR>/${id}_sorted.bam <BISMARK_DIR>/${id}_1_val_1_bismark_bt2_pe.bam
+    samtools index <BISMARK_DIR>/${id}_sorted.bam
+    
+    # Generate normalized coverage tracks (RPKM)
+    bamCoverage \
+        --outFileFormat bigwig \
+        --binSize 10 \
+        --skipNonCoveredRegions \
+        --numberOfProcessors 48 \
+        --normalizeUsing RPKM \
+        -b <BISMARK_DIR>/${id}_sorted.bam \
+        -o <TRACK_DIR>/${id}.bw
+done
