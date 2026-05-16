@@ -1,0 +1,47 @@
+# ==========================================
+# ATAC-Seq Preprocessing Pipeline
+# ==========================================
+
+# 1. Quality Control and Adapter Trimming
+# Trimming Nextera adapters and low-quality bases using Trim Galore
+cat sample_list.txt | while read id; do
+    trim_galore \
+        --nextera \
+        --paired \
+        --cores 6 \
+        --output_dir <TRIM_DIR>/ \
+        <RAW_DIR>/${id}_1.fq.gz \
+        <RAW_DIR>/${id}_2.fq.gz
+done
+
+# 2. Genome Alignment and BAM File Processing
+# Aligning reads and immediately converting to sorted/indexed BAM format
+IN_DIR="<TRIM_DIR>"
+ALIGN_DIR="<ALIGN_DIR>"
+
+cat sample_list.txt | while read id; do
+    # Read alignment
+    hisat2 -p 45 \
+        -x <INDEX_DIR>/hs_v44 \
+        -1 ${IN_DIR}/${id}_1_trimmed.fq.gz \
+        -2 ${IN_DIR}/${id}_2_trimmed.fq.gz \
+        -S ${ALIGN_DIR}/${id}.sam \
+        --summary-file ${ALIGN_DIR}/${id}_summary.txt
+    
+    # Convert SAM to BAM, sort, and index
+    samtools view -hb ${ALIGN_DIR}/${id}.sam > ${ALIGN_DIR}/${id}.bam
+    samtools sort ${ALIGN_DIR}/${id}.bam -o ${ALIGN_DIR}/${id}.sorted.bam
+    samtools index -b ${ALIGN_DIR}/${id}.sorted.bam
+done
+
+# 3. BigWig Track Generation
+# Generating normalized coverage tracks (RPGC) for visualization and downstream analysis
+for id in PE PN; do
+    bamCoverage \
+        --bam <ALIGN_DIR>/${id}.sorted.bam \
+        -o <TRACK_DIR>/${id}.bw \
+        --binSize 10 \
+        --normalizeUsing RPGC \
+        --effectiveGenomeSize 2913022398 \
+        -p 80
+done
