@@ -83,3 +83,36 @@ salmon quantmerge \
     --quants <SALMON_OUT_DIR>/*_quant \
     --column NumReads \
     -o <SALMON_OUT_DIR>/transcript_LR_counts.csv
+
+# 1. Generate local AS events from the filtered transcriptome GTF
+# Extracts events: Skipped Exon (SE), Alternative Splice Sites (SS), Retained Intron (RI), Mutually Exclusive (MX), and Alternative First/Last Exon (FL)
+suppa.py generateEvents \
+    -i <REF_DIR>/tpm_filter.gtf \
+    -o <SUPPA_DIR>/A.events \
+    -e SE SS RI MX FL \
+    -f ioe
+
+# 2. Merge all IOE (Isoform Overlapping Event) files into a single master file
+awk 'FNR==1 && NR!=1 { while (/^<header>/) getline; } 1 {print}' <SUPPA_DIR>/*.ioe > <SUPPA_DIR>/SRR_events.ioe
+
+# 3. Calculate PSI (Percent Spliced In) per event based on the TPM expression matrix
+suppa.py psiPerEvent \
+    -i <SUPPA_DIR>/SRR_events.ioe \
+    -e <EXP_MATRICES_DIR>/tpm.txt \
+    -o <SUPPA_DIR>/S_events
+
+# 4. Split the unified PSI and TPM matrices into biological cohorts (PE vs. PN)
+# Note: Column indices (1-4, 5-7) correspond to specific sample columns in the matrices
+cut -f 1-4 <SUPPA_DIR>/S_events.psi > <SUPPA_DIR>/PE.psi 
+cut -f 1,5-7 <SUPPA_DIR>/S_events.psi > <SUPPA_DIR>/PN.psi
+
+cut -f 1-4 <EXP_MATRICES_DIR>/tpm.txt > <SUPPA_DIR>/PE.tpm
+cut -f 1,5-7 <EXP_MATRICES_DIR>/tpm.txt > <SUPPA_DIR>/PN.tpm
+
+# 5. Calculate Differential Alternative Splicing (DAS)
+suppa.py diffSplice \
+    -m empirical -gc \
+    -i <SUPPA_DIR>/SRR_events.ioe \
+    -p <SUPPA_DIR>/PE.psi <SUPPA_DIR>/PN.psi \
+    -e <SUPPA_DIR>/PE.tpm <SUPPA_DIR>/PN.tpm \
+    -o <SUPPA_DIR>/srr_diffSplice
