@@ -1,0 +1,85 @@
+
+Full-Length RNA-Seq Preprocessing and Quantification Pipeline
+This repository provides the complete bioinformatics pipeline used for processing Oxford Nanopore Technologies (ONT) long-read RNA sequencing data. The workflow covers raw read filtering, genome alignment, isoform collapsing, rigorous quality control, and transcript quantification.
+
+For reproducibility and peer review, absolute system paths have been replaced with generic directory variables (e.g., <RAW_DATA_DIR>, <REF_DIR>).
+
+1. Raw Read Quality Control and Filtering
+Raw ONT reads are filtered to remove short fragments and ultra-long outliers to ensure downstream alignment accuracy. We utilized chopper to restrict read lengths between 200 bp and 25,000 bp.
+# Iterate through the sample ID list
+cat sample_list.txt | while read id; do
+    chopper \
+        --minlength 200 \
+        --maxlength 25000 \
+        -t 80 \
+        -i <RAW_DATA_DIR>/${id}_raw.fq \
+        > <FILTERED_DIR>/${id}_chopper.fq
+done
+
+cat sample_list.txt | while read id; do
+    # 1. Align long reads to the reference genome
+    minimap2 -ax splice -uf -k14 --secondary=no \
+        <REF_DIR>/hs38.mmi \
+        <FILTERED_DIR>/${id}_chopper.fasta \
+        > <ALIGN_DIR>/${id}.sam
+
+    # 2. Filter high-quality alignments and sort to generate SAM/BAM format
+    sambamba view --with-header --nthreads 50 --sam-input --format sam \
+        --filter "not unmapped and mapping_quality >= 50" <ALIGN_DIR>/${id}.sam | \
+    samtools sort -O sam -o <ALIGN_DIR>/${id}.sorted.sam
+done
+
+collapse_isoforms_by_sam.py \
+    --input <MERGED_DIR>/merged_filtered.fasta \
+    -s <MERGED_DIR>/merged_aligned.sam \
+    -c 0.9 -i 0.9 \
+    --dun-merge-5-shorter \
+    --max_3_diff 500 \
+    -o <COLLAPSE_DIR>/collapsed_isoforms
+
+    # 1. Isoform characterization and quality control
+python <SQANTI3_DIR>/sqanti3_qc.py <COLLAPSE_DIR>/collapsed_isoforms.gff \
+    <REF_DIR>/gencode.v44.annotation.gtf \
+    <REF_DIR>/GRCh38.p14.genome.fa \
+    --CAGE_peak <SQANTI3_DATA_DIR>/human.refTSS_v3.1.hg38.bed \
+    --polyA_motif_list <SQANTI3_DATA_DIR>/mouse_and_human.polyA_motif.txt \
+    -o study_cohort \
+    -d <SQANTI3_OUT_DIR> \
+    -t 80 --report both
+
+# 2. Structural filtering to generate the final high-confidence transcriptome
+python <SQANTI3_DIR>/sqanti3_filter.py rules <SQANTI3_OUT_DIR>/study_cohort_classification.txt \
+    --gtf <SQANTI3_OUT_DIR>/study_cohort_corrected.gtf \
+    --faa <SQANTI3_OUT_DIR>/study_cohort_corrected.faa \
+    -o study_cohort_filtered \
+    --sam <MERGED_DIR>/merged_aligned.sam \
+    --isoAnnotGFF3 <SQANTI3_OUT_DIR>/study_cohort_corrected.gtf.cds.gff \
+    --isoforms <SQANTI3_OUT_DIR>/study_cohort_corrected.fasta
+
+
+# 1. Build Salmon index using the highly confident filtered transcriptome
+salmon index \
+    -t <SQANTI3_OUT_DIR>/study_cohort_filtered.fasta \
+    -i <SALMON_OUT_DIR>/transcripts_index \
+    -k 31 -p 80
+
+# 2. Quantify transcript abundance for each biological sample
+cat sample_list.txt | while read id; do
+    salmon quant \
+        -i <SALMON_OUT_DIR>/transcripts_index \
+        -p 40 -l A \
+        -r <FILTERED_DIR>/${id}_chopper.fq \
+        -o <SALMON_OUT_DIR>/${id}_quant
+done
+
+# 3. Merge TPM (Transcripts Per Million) values into a comprehensive matrix
+salmon quantmerge \
+    --quants <SALMON_OUT_DIR>/*_quant \
+    --column TPM \
+    -o <SALMON_OUT_DIR>/transcript_LR_TPM.csv
+
+# 4. Merge raw read counts into a separate matrix for downstream differential analysis
+salmon quantmerge \
+    --quants <SALMON_OUT_DIR>/*_quant \
+    --column NumReads \
+    -o <SALMON_OUT_DIR>/transcript_LR_counts.csv
