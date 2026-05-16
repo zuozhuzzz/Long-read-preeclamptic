@@ -1,0 +1,63 @@
+# Short-Read RNA-Seq Preprocessing and Alternative Splicing Pipeline
+
+This section details the bioinformatics workflow for processing Illumina short-read RNA sequencing data. The pipeline includes adapter trimming, reference genome alignment, transcript quantification, and a comprehensive alternative splicing (AS) analysis using SUPPA2. 
+
+System paths have been replaced with generic directory placeholders (e.g., `<RAW_DIR>`, `<TRIM_DIR>`) for clarity and reproducibility.
+
+## 1. Quality Control and Adapter Trimming
+
+Raw paired-end short reads are processed using `Trim Galore` to remove Nextera adapter sequences and low-quality bases.
+
+bash
+cat short_read_samples.txt | while read id; do
+    trim_galore \
+        --nextera \
+        --paired \
+        --cores 6 \
+        --output_dir <TRIM_DIR> \
+        <RAW_DIR>/${id}_1.fq.gz \
+        <RAW_DIR>/${id}_2.fq.gz
+done
+
+cat short_read_samples.txt | while read id; do
+    # 1. Align reads to the reference genome
+    hisat2 -p 85 \
+        -x <HISAT2_INDEX_DIR>/hs_v44 \
+        --dta-cufflinks --no-mixed --no-discordant \
+        -1 <TRIM_DIR>/${id}_1_val_1.fq.gz \
+        -2 <TRIM_DIR>/${id}_2_val_2.fq.gz \
+        -S <ALIGN_DIR>/${id}.sam \
+        --summary-file <ALIGN_DIR>/${id}_summary.txt
+    
+    # 2. Convert SAM to BAM, sort, and index
+    samtools view -hb <ALIGN_DIR>/${id}.sam > <ALIGN_DIR>/${id}.bam
+    samtools sort <ALIGN_DIR>/${id}.bam -o <ALIGN_DIR>/${id}.sorted.bam
+    samtools index -b <ALIGN_DIR>/${id}.sorted.bam
+done
+
+
+
+# 1. Quantify transcript abundance for each sample
+cat short_read_samples.txt | while read id; do
+    salmon quant \
+        -p 80 -l A \
+        -i <SALMON_INDEX_DIR>/transcripts_index \
+        -1 <TRIM_DIR>/${id}_val_1.fq \
+        -2 <TRIM_DIR>/${id}_val_2.fq \
+        -o <SALMON_OUT_DIR>/${id}_quant
+done
+
+# 2. Merge TPM (Transcripts Per Million) values
+salmon quantmerge \
+    --quants <SALMON_OUT_DIR>/P*_quant \
+    --column TPM \
+    -o <SALMON_OUT_DIR>/transcript_SR.TPM.csv
+
+# 3. Merge raw NumReads (for differential gene expression)
+salmon quantmerge \
+    --quants <SALMON_OUT_DIR>/P*_quant \
+    --column NumReads \
+    -o <SALMON_OUT_DIR>/transcript_SR.num.csv
+
+
+
